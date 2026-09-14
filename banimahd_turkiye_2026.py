@@ -214,10 +214,8 @@ class Banimahd2026Turkiye(GMPE):
         # Unit conversion
         # PGA / SA: cm/s^2 -> g (subtract ln(981))
         # PGV    : stays in cm/s
-        if imt_str == "PGA" or imt_str.startswith("SA("):
-            ln_im = ln_im_train 
-        else:
-            ln_im = ln_im_train
+         ln_im = ln_im_train 
+
 
         # Standard deviations from stds.csv
         if key not in _SIGMA_INTRA:
