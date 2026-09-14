@@ -214,7 +214,7 @@ class Banimahd2026Turkiye(GMPE):
         # Unit conversion
         # PGA / SA: cm/s^2 -> g (subtract ln(981))
         # PGV    : stays in cm/s
-         ln_im = ln_im_train 
+        ln_im = ln_im_train 
 
 
         # Standard deviations from stds.csv
