@@ -25,7 +25,7 @@ Model overview
     5. Vs30       : averaged shear-wave velocity in the top 30 m (m/s)
 
 Outputs (25 values, in ln-space):
-    - PGA, PSA(T): ln(cm/s^2)
+    - PGA, PSA(T): ln(g)
     - PGV       : ln(cm/s)
 """
 
@@ -54,7 +54,7 @@ for _name in _IMC_CANDIDATES:
         _IMC_GMEAN = getattr(const.IMC, _name)
         break
 else:
-    _IMC_GMEAN = list(const.IMC)[0]
+    _IMC_GMEAN = list(const.IMT)[0]
 
 # ---------------------------------------------------------------------
 # Paths
@@ -143,97 +143,86 @@ class Banimahd2026Turkiye(GMPE):
     REQUIRES_DISTANCES = {"rjb"}
     REQUIRES_SITES_PARAMETERS = {"vs30"}
 
-    # Mapping from OpenQuake IMT string to stds.csv ID
-    _IMT_TO_KEY = {
-        "PGA": "ln(PGA)",
-        "PGV": "ln(PGV)",
-    }
-
-    # Periods supported by the model (in seconds)
     _PERIODS = [0.03, 0.05, 0.075, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4,
                 0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
 
-    def get_mean_and_stddevs(self, sites, rup, dists, imt, stddev_types):
+    def compute(self, ctx: np.recarray, imts, mean, sig, tau, phi):
         """
-        Compute mean ln(IM) and standard deviations for the requested IMT.
+        Compute mean and standard deviations for all requested IMTs at once.
 
-        Returns
-        -------
-        mean : np.ndarray, shape (N,)
-            Mean logarithm of IM at each site.
-        stds : list of np.ndarray
-            One array per requested stddev type.
+        Parameters
+        ----------
+        ctx : np.recarray
+            Context object with rupture, distance, and site parameters.
+        imts : list
+            List of intensity measure types.
+        mean : np.ndarray
+            Output array for mean values, shape (M, N).
+        sig : np.ndarray
+            Output array for total stddev, shape (M, N).
+        tau : np.ndarray
+            Output array for inter-event stddev, shape (M, N).
+        phi : np.ndarray
+            Output array for intra-event stddev, shape (M, N).
         """
-        N = len(sites)
+        # Number of sites
+        N = mean.shape[1]
 
-        Mw = np.full(N, rup.mag, dtype=float)
-        RJB = np.asarray(dists.rjb, dtype=float)
-        Vs30 = np.asarray(sites.vs30, dtype=float)
-        FD = np.full(N, rup.hypo_depth, dtype=float)
+        # Extract scalar values from ctx
+        mag = np.atleast_1d(ctx.mag).astype(float)[0]
+        hypo_depth = np.atleast_1d(ctx.hypo_depth).astype(float)[0]
+        rake_val = np.atleast_1d(ctx.rake).astype(float)[0]
 
-        # Fault mechanism encoding from rake
-        rake = float(rup.rake)
-        if rake < -30.0:
-            FM = np.full(N, 1.0, dtype=float)   # Normal
-        elif rake > 30.0:
-            FM = np.full(N, 2.0, dtype=float)   # Reverse
+        rjb_arr = np.atleast_1d(ctx.rjb).astype(float)
+        vs30_arr = np.atleast_1d(ctx.vs30).astype(float)
+
+        # Broadcast to length N
+        if len(rjb_arr) != N:
+            rjb_arr = np.resize(rjb_arr, N)
+        if len(vs30_arr) != N:
+            vs30_arr = np.resize(vs30_arr, N)
+
+        # Build input arrays
+        Mw = np.full(N, mag, dtype=float)
+        RJB = rjb_arr
+        Vs30 = vs30_arr
+        FD = np.full(N, hypo_depth, dtype=float)
+
+        # Fault mechanism
+        if rake_val < -30.0:
+            FM = np.full(N, 1.0, dtype=float)
+        elif rake_val > 30.0:
+            FM = np.full(N, 2.0, dtype=float)
         else:
-            FM = np.full(N, 3.0, dtype=float)   # Strike-slip
+            FM = np.full(N, 3.0, dtype=float)
 
-        # Order: FD, FM, Mw, RJB, VS30
+        # Build input matrix (FD, FM, Mw, RJB, VS30)
         X = np.column_stack([FD, FM, Mw, RJB, Vs30]).astype(np.float32)
 
-        # IMT identification
-        imt_str = str(imt)
-
-        if imt_str == "PGA":
-            out_idx = 0
-            key = "ln(PGA)"
-        elif imt_str == "PGV":
-            out_idx = 1
-            key = "ln(PGV)"
-        elif imt_str.startswith("SA(") and imt_str.endswith(")"):
-            period = float(imt_str[3:-1])
-            if period not in self._PERIODS:
-                raise ValueError(
-                    f"Period {period} not supported. "
-                    f"Supported periods: {self._PERIODS}"
-                )
-            out_idx = 7 + self._PERIODS.index(period)
-            key = f"ln(PSA={period})"
-        else:
-            raise ValueError(f"IMT {imt_str} not supported in Banimahd2026Turkiye")
-
-        # Run ONNX inference
+        # Run ONNX inference once for all 25 outputs
         sess = _get_session()
         input_name = sess.get_inputs()[0].name
         output_name = sess.get_outputs()[0].name
         out = sess.run([output_name], {input_name: X})[0]
-        ln_im_train = out[:, out_idx].astype(float)
 
-        # Unit conversion
-        # PGA / SA: cm/s^2 -> g (subtract ln(981))
-        # PGV    : stays in cm/s
-        ln_im = ln_im_train 
+        # Fill mean/sig/tau/phi for each requested IMT
+        for m, imt in enumerate(imts):
+            imt_str = str(imt)
 
-
-        # Standard deviations from stds.csv
-        if key not in _SIGMA_INTRA:
-            raise KeyError(f"No stddev entry for IM key '{key}' in stds.csv")
-
-        sigma = _SIGMA_INTRA[key]
-        tau = _TAU_INTER[key]
-        phi = _PHI_TOTAL[key]
-
-        stds = []
-        for s in stddev_types:
-            if s == const.StdDev.INTRA_EVENT:
-                stds.append(np.full_like(ln_im, sigma))
-            elif s == const.StdDev.INTER_EVENT:
-                stds.append(np.full_like(ln_im, tau))
-            elif s == const.StdDev.TOTAL:
-                stds.append(np.full_like(ln_im, phi))
+            if imt_str == "PGA":
+                out_idx = 0
+                key = "ln(PGA)"
+            elif imt_str == "PGV":
+                out_idx = 1
+                key = "ln(PGV)"
+            elif imt_str.startswith("SA(") and imt_str.endswith(")"):
+                period = float(imt_str[3:-1])
+                out_idx = 7 + self._PERIODS.index(period)
+                key = f"ln(PSA={period})"
             else:
-                raise ValueError(f"StdDev type {s} not supported.")
+                raise ValueError(f"IMT {imt_str} not supported")
 
-        return ln_im, stds
+            mean[m, :] = out[:, out_idx]
+            sig[m, :]  = _PHI_TOTAL[key]     # TOTAL
+            tau[m, :]  = _TAU_INTER[key]     # INTER-EVENT
+            phi[m, :]  = _SIGMA_INTRA[key]   # INTRA-EVENT
